@@ -24,6 +24,10 @@ User Input → LLM → Tool Calls → Execute → Feed Results Back → Repeat
 - 📡 **Pipe Mode** — Non-interactive mode for scripting: `echo "fix the bug" | nano-claude`
 - 🔌 **Provider Abstraction** — `LLMProvider` interface ready for OpenAI/Ollama/local models
 
+## Screenshot
+
+![nano-claude-code in action](imgs/image.png)
+
 ## Architecture
 
 ```

@@ -10,6 +10,7 @@ import * as readline from "node:readline";
 import chalk from "chalk";
 import { loadConfig } from "./utils/config.js";
 import { AnthropicProvider } from "./api/anthropic.js";
+import { OpenAIProvider } from "./api/openai.js";
 import { ALL_TOOLS } from "./tools/index.js";
 import { collectContext } from "./context.js";
 import { buildSystemPrompt } from "./prompt.js";
@@ -162,7 +163,7 @@ async function main() {
   if (!config.apiKey) {
     console.error(
       chalk.red(
-        "Error: No API key found. Set ANTHROPIC_API_KEY environment variable or add apiKey to ~/.nano-claude.json"
+        "Error: No API key found. Set NANO_API_KEY (or ANTHROPIC_API_KEY) environment variable, or add apiKey to ~/.nano-claude.json"
       )
     );
     process.exit(1);
@@ -172,6 +173,11 @@ async function main() {
   let provider: LLMProvider;
   if (config.provider === "anthropic") {
     provider = new AnthropicProvider(config.apiKey);
+  } else if (config.provider === "openai") {
+    provider = new OpenAIProvider({
+      apiKey: config.apiKey,
+      baseURL: config.baseURL,
+    });
   } else {
     console.error(chalk.red(`Unsupported provider: ${config.provider}`));
     process.exit(1);

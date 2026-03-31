@@ -14,6 +14,7 @@ const DEFAULT_CONFIG: NanoConfig = {
   model: "claude-sonnet-4-20250514",
   maxTokens: 16384,
   apiKey: "",
+  baseURL: "https://api.openai.com/v1",
   permissionMode: "ask",
 };
 
@@ -47,10 +48,14 @@ export async function loadConfig(): Promise<NanoConfig> {
       fileConfig.maxTokens ||
       DEFAULT_CONFIG.maxTokens,
     apiKey:
-      process.env.ANTHROPIC_API_KEY ||
       process.env.NANO_API_KEY ||
+      process.env.ANTHROPIC_API_KEY ||
       fileConfig.apiKey ||
       DEFAULT_CONFIG.apiKey,
+    baseURL:
+      process.env.NANO_BASE_URL ||
+      fileConfig.baseURL ||
+      DEFAULT_CONFIG.baseURL,
     permissionMode:
       (process.env.NANO_PERMISSION_MODE as NanoConfig["permissionMode"]) ||
       fileConfig.permissionMode ||

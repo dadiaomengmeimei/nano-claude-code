@@ -98,6 +98,8 @@ export interface NanoConfig {
   model: string;
   maxTokens: number;
   apiKey: string;
+  /** Base URL for OpenAI-compatible APIs (e.g. https://api.moonshot.cn/v1) */
+  baseURL: string;
   /** Permission mode: 'ask' prompts user, 'auto' allows all */
   permissionMode: "ask" | "auto";
 }
