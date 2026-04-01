@@ -1,6 +1,6 @@
 {
   "name": "nano-claude-code",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A nano-sized AI coding assistant inspired by Claude Code",
   "type": "module",
   "main": "dist/main.js",
@@ -10,7 +10,9 @@
   "scripts": {
     "build": "tsc",
     "start": "node --enable-source-maps dist/main.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:build": "tsc && node --test dist/tests/*.test.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
@@ -20,7 +22,8 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0"
   },
   "engines": {
     "node": ">=20.0.0"

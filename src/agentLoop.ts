@@ -20,7 +20,6 @@ import type {
   ToolDefinition,
   ToolResult,
 } from "./types.js";
-import { getToolByName } from "./tools/index.js";
 
 const MAX_TOOL_ROUNDS = 30;
 
@@ -177,7 +176,7 @@ export async function runAgentLoop(options: AgentLoopOptions): Promise<Message[]
     const toolResultBlocks: ContentBlock[] = [];
 
     for (const toolUse of toolUseBlocks) {
-      const tool = getToolByName(toolUse.name);
+      const tool = tools.find((t) => t.name === toolUse.name);
 
       if (!tool) {
         toolResultBlocks.push({

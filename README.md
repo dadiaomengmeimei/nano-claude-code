@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**A minimal AI coding agent in 1,646 lines of TypeScript.**
+**A minimal AI coding agent in ~2,300 lines of TypeScript.**
 
 > Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code)'s 512K+ line codebase. Same core loop. 99.7% less code.
 
@@ -48,20 +48,23 @@ ANTHROPIC_API_KEY=sk-xxx npx tsx tutorials/01-minimal-agent.ts "list all files"
 
 | | Claude Code | nano-claude-code |
 |---|---|---|
-| Source files | ~1,900 | **15** |
-| Lines of code | 512,000+ | **1,646** |
+| Source files | ~1,900 | **19** |
+| Lines of code | 512,000+ | **~2,300** |
 | Runtime deps | 50+ | **4** |
-| Tools | 40+ | **6** |
+| Tools | 40+ | **7** |
 | Runtime | Bun | **Node.js ≥ 20** |
 
 ## Features
 
 - 🔄 **Agent Loop** — Query → tool-use → result → reasoning cycle (up to 30 rounds)
 - 🌊 **Streaming** — Real-time token-by-token output
-- 🛠️ **6 Tools** — Bash, FileRead, FileEdit, FileWrite, Grep, Glob
+- 🛠️ **7 Tools** — Bash, FileRead, FileEdit, FileWrite, Grep, Glob, SubAgent
 - 🔐 **Permissions** — Read-only auto-allowed; write/shell requires confirmation
+- 🗜️ **Compact** — `/compact` summarizes conversation to save tokens (like Claude Code)
+- 🤖 **SubAgent** — Delegate subtasks to independent sub-agents (like Claude Code Task tool)
+- ✅ **Tested** — 41 tests covering agent loop, tools, schema, and compact
 - 📋 **Context Aware** — Auto-reads `CLAUDE.md`, detects project type, gathers Git info
-- 💬 **REPL** — Slash commands (`/help`, `/clear`, `/history`, `/exit`)
+- 💬 **REPL** — Slash commands (`/help`, `/clear`, `/compact`, `/history`, `/exit`)
 - 📡 **Pipe Mode** — `echo "fix the bug" | nano-claude` for scripting
 - 🔌 **Extensible** — `LLMProvider` interface for OpenAI/Ollama/local models
 
@@ -80,12 +83,14 @@ nano-claude-code/
     ├── main.ts            # Terminal REPL + permission UI
     ├── agentLoop.ts       # Core: LLM → tool detection → execution → loop
     ├── types.ts           # Message, Tool, Provider, Config types
+    ├── compact.ts       # /compact: conversation summarization
     ├── prompt.ts          # System prompt builder
     ├── context.ts         # CLAUDE.md + project detection + Git
     ├── api/anthropic.ts   # Anthropic streaming provider
     ├── api/openai.ts      # OpenAI-compatible provider (Kimi, DeepSeek, etc.)
-    ├── tools/             # 6 tools: bash, fileRead, fileEdit, fileWrite, grep, glob
-    └── utils/             # Config loading, Zod → JSON Schema
+    ├── tools/             # 7 tools: bash, fileRead, fileEdit, fileWrite, grep, glob, subAgent
+    ├── utils/             # Config loading, Zod → JSON Schema
+    └── tests/             # 41 tests (node:test + tsx)
 ```
 
 ## Configuration

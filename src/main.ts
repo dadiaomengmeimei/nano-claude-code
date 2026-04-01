@@ -15,6 +15,8 @@ import { ALL_TOOLS } from "./tools/index.js";
 import { collectContext } from "./context.js";
 import { buildSystemPrompt } from "./prompt.js";
 import { runAgentLoop } from "./agentLoop.js";
+import { compactConversation, estimateTokens } from "./compact.js";
+import { configureSubAgent } from "./tools/subAgent.js";
 import type { Message, LLMProvider, ToolResult } from "./types.js";
 
 // ============================================================
@@ -22,28 +24,29 @@ import type { Message, LLMProvider, ToolResult } from "./types.js";
 // ============================================================
 
 const BANNER = `
-${chalk.bold.cyan("nano-claude-code")} ${chalk.dim("v0.1.0")}
+${chalk.bold.cyan("nano-claude-code")} ${chalk.dim("v0.2.0")}
 ${chalk.dim("A minimal AI coding assistant")}
 ${chalk.dim("Type your message, or use:")}
-  ${chalk.yellow("/help")}  - Show commands
-  ${chalk.yellow("/clear")} - Clear conversation
-  ${chalk.yellow("/exit")}  - Quit
-${"─".repeat(50)}
+  ${chalk.yellow("/help")}    - Show commands
+  ${chalk.yellow("/clear")}   - Clear conversation
+  ${chalk.yellow("/compact")} - Summarize conversation to save tokens
+  ${chalk.yellow("/exit")}    - Quit
+${"\u2500".repeat(50)}
 `;
 
 function printToolCall(name: string, input: Record<string, unknown>) {
   const summary = getToolSummary(name, input);
-  process.stdout.write(chalk.dim(`\n⚡ ${name}: ${summary}\n`));
+  process.stdout.write(chalk.dim(`\n\u26A1 ${name}: ${summary}\n`));
 }
 
 function printToolResult(name: string, result: ToolResult) {
   if (result.isError) {
-    process.stdout.write(chalk.red(`  ✗ Error\n`));
+    process.stdout.write(chalk.red(`  \u2717 Error\n`));
   } else {
     // Show a brief summary
     const lines = result.output.split("\n");
     const preview = lines[0]?.slice(0, 80) || "(empty)";
-    process.stdout.write(chalk.green(`  ✓ `) + chalk.dim(preview) + "\n");
+    process.stdout.write(chalk.green(`  \u2713 `) + chalk.dim(preview) + "\n");
   }
 }
 
@@ -61,6 +64,8 @@ function getToolSummary(name: string, input: Record<string, unknown>): string {
       return `/${input.pattern}/ in ${input.path || "."}`;
     case "Glob":
       return `${input.pattern} in ${input.path || "."}`;
+    case "SubAgent":
+      return String(input.task || "").slice(0, 60);
     default:
       return JSON.stringify(input).slice(0, 60);
   }
@@ -77,7 +82,7 @@ async function askPermission(
 ): Promise<boolean> {
   const summary = getToolSummary(toolName, input);
   process.stdout.write(
-    chalk.yellow(`\n⚠ Permission required: ${toolName}: ${summary}\n`)
+    chalk.yellow(`\n\u26A0 Permission required: ${toolName}: ${summary}\n`)
   );
 
   // Show relevant details
@@ -87,6 +92,8 @@ async function askPermission(
     process.stdout.write(chalk.dim(`  File: ${input.file_path}\n`));
   } else if (toolName === "FileWrite") {
     process.stdout.write(chalk.dim(`  File: ${input.file_path}\n`));
+  } else if (toolName === "SubAgent") {
+    process.stdout.write(chalk.dim(`  Task: ${String(input.task || "").slice(0, 100)}\n`));
   }
 
   return new Promise<boolean>((resolve) => {
@@ -104,10 +111,17 @@ async function askPermission(
 // Slash commands
 // ============================================================
 
-function handleSlashCommand(
+interface SlashCommandContext {
+  provider: LLMProvider;
+  model: string;
+  maxTokens: number;
+}
+
+async function handleSlashCommand(
   cmd: string,
-  conversationMessages: Message[]
-): { handled: boolean; shouldExit?: boolean; messages?: Message[] } {
+  conversationMessages: Message[],
+  ctx?: SlashCommandContext
+): Promise<{ handled: boolean; shouldExit?: boolean; messages?: Message[] }> {
   const trimmed = cmd.trim().toLowerCase();
 
   switch (trimmed) {
@@ -116,6 +130,7 @@ function handleSlashCommand(
 ${chalk.bold("Available commands:")}
   ${chalk.yellow("/help")}    - Show this help
   ${chalk.yellow("/clear")}   - Clear conversation history
+  ${chalk.yellow("/compact")} - Summarize conversation to save tokens
   ${chalk.yellow("/history")} - Show conversation summary
   ${chalk.yellow("/exit")}    - Quit (also Ctrl+C)
 `);
@@ -125,17 +140,50 @@ ${chalk.bold("Available commands:")}
       console.log(chalk.dim("Conversation cleared."));
       return { handled: true, messages: [] };
 
-    case "/history":
+    case "/compact": {
+      if (!ctx) {
+        console.log(chalk.red("Compact not available."));
+        return { handled: true };
+      }
+
+      const tokensBefore = estimateTokens(conversationMessages);
+      console.log(chalk.dim(`\nCompacting conversation (${conversationMessages.length} messages, ~${tokensBefore} tokens)...`));
+
+      try {
+        const result = await compactConversation(
+          conversationMessages,
+          ctx.provider,
+          ctx.model,
+          ctx.maxTokens
+        );
+
+        if (result.summary) {
+          console.log(chalk.green(`\n\u2713 Compacted: ${result.beforeTokens} \u2192 ${result.afterTokens} tokens (${Math.round((1 - result.afterTokens / result.beforeTokens) * 100)}% reduction)`));
+          console.log(chalk.dim(`  ${result.messages.length} messages remaining`));
+          return { handled: true, messages: result.messages };
+        } else {
+          console.log(chalk.yellow("Conversation too short to compact."));
+          return { handled: true };
+        }
+      } catch (err: any) {
+        console.log(chalk.red(`Compact failed: ${err.message}`));
+        return { handled: true };
+      }
+    }
+
+    case "/history": {
       const userMsgs = conversationMessages.filter((m) => m.role === "user");
       const assistantMsgs = conversationMessages.filter(
         (m) => m.role === "assistant"
       );
+      const tokens = estimateTokens(conversationMessages);
       console.log(
         chalk.dim(
-          `Conversation: ${userMsgs.length} user messages, ${assistantMsgs.length} assistant messages`
+          `Conversation: ${userMsgs.length} user messages, ${assistantMsgs.length} assistant messages, ~${tokens} tokens`
         )
       );
       return { handled: true };
+    }
 
     case "/exit":
     case "/quit":
@@ -183,6 +231,14 @@ async function main() {
     process.exit(1);
   }
 
+  // Configure SubAgent with current provider and settings
+  configureSubAgent({
+    provider,
+    model: config.model,
+    maxTokens: config.maxTokens,
+    tools: ALL_TOOLS,
+  });
+
   // Collect project context
   const cwd = process.cwd();
   const projectContext = await collectContext(cwd);
@@ -192,16 +248,24 @@ async function main() {
   console.log(BANNER);
   console.log(chalk.dim(`Provider: ${config.provider} | Model: ${config.model}`));
   console.log(chalk.dim(`Working directory: ${cwd}`));
-  console.log(chalk.dim(`Permission mode: ${config.permissionMode}\n`));
+  console.log(chalk.dim(`Permission mode: ${config.permissionMode}`));
+  console.log(chalk.dim(`Tools: ${ALL_TOOLS.map((t) => t.name).join(", ")}\n`));
 
   // Setup readline
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: chalk.bold.cyan("\n❯ "),
+    prompt: chalk.bold.cyan("\n\u276F "),
   });
 
   let conversationMessages: Message[] = [];
+
+  // Slash command context for /compact
+  const slashCtx: SlashCommandContext = {
+    provider,
+    model: config.model,
+    maxTokens: config.maxTokens,
+  };
 
   // Handle Ctrl+C gracefully
   rl.on("SIGINT", () => {
@@ -259,7 +323,7 @@ async function main() {
     }
 
     // Handle slash commands
-    const cmdResult = handleSlashCommand(input, conversationMessages);
+    const cmdResult = await handleSlashCommand(input, conversationMessages, slashCtx);
     if (cmdResult.handled) {
       if (cmdResult.shouldExit) {
         console.log(chalk.dim("Goodbye!"));
