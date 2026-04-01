@@ -22,6 +22,28 @@ export ANTHROPIC_API_KEY=sk-ant-your-key-here
 npm start
 ```
 
+## 📚 Step-by-Step Tutorials
+
+**Build an AI coding agent from scratch in 6 steps.** Each tutorial is a single runnable TypeScript file that builds on the previous one.
+
+```bash
+# Run any tutorial directly (no build needed):
+ANTHROPIC_API_KEY=sk-xxx npx tsx tutorials/01-minimal-agent.ts "list all files"
+```
+
+| # | Tutorial | Lines | What You Build | What You Learn |
+|---|----------|-------|----------------|----------------|
+| [01](tutorials/01-minimal-agent.ts) | **Minimal Agent** | 80 | LLM + Bash in a loop | The core agent pattern: `while(tool_calls) { execute → feed_back }` |
+| [02](tutorials/02-file-tools-streaming.ts) | **File Tools + Streaming** | 150 | + FileRead, FileWrite, streaming | Multiple tools, real-time token output |
+| [03](tutorials/03-permissions.ts) | **Permissions** | 160 | + Y/N confirmation for writes | Read=auto, write=ask — the simplest safety model |
+| [04](tutorials/04-context-awareness.ts) | **Context Awareness** | 170 | + CLAUDE.md, project detection, Git | Why Claude Code's prompt is "assembled, not written" |
+| [05](tutorials/05-repl-conversation.ts) | **REPL + Memory** | 170 | + Interactive loop, /commands | Conversation state, slash commands |
+| [06](tutorials/06-search-and-edit.ts) | **Full Agent** | 210 | + Grep, Glob, FileEdit | Complete 6-tool agent in one file |
+
+**Tutorial 06 is essentially nano-claude-code in a single file.** The full `src/` version adds: modular architecture, Zod schemas, OpenAI-compatible provider, config system, and pipe mode.
+
+> 💡 Each file is self-contained. Start from 01 and work your way up, or jump to any step.
+
 ## vs Claude Code
 
 | | Claude Code | nano-claude-code |
@@ -46,15 +68,24 @@ npm start
 ## Architecture
 
 ```
-src/
-├── main.ts            # Terminal REPL + permission UI
-├── agentLoop.ts       # Core: LLM → tool detection → execution → loop
-├── types.ts           # Message, Tool, Provider, Config types
-├── prompt.ts          # System prompt builder
-├── context.ts         # CLAUDE.md + project detection + Git
-├── api/anthropic.ts   # Anthropic streaming provider
-├── tools/             # 6 tools: bash, fileRead, fileEdit, fileWrite, grep, glob
-└── utils/             # Config loading, Zod → JSON Schema
+nano-claude-code/
+├── tutorials/             # 👈 Start here! 6 progressive tutorials
+│   ├── 01-minimal-agent.ts
+│   ├── 02-file-tools-streaming.ts
+│   ├── 03-permissions.ts
+│   ├── 04-context-awareness.ts
+│   ├── 05-repl-conversation.ts
+│   └── 06-search-and-edit.ts
+└── src/                   # Full modular implementation
+    ├── main.ts            # Terminal REPL + permission UI
+    ├── agentLoop.ts       # Core: LLM → tool detection → execution → loop
+    ├── types.ts           # Message, Tool, Provider, Config types
+    ├── prompt.ts          # System prompt builder
+    ├── context.ts         # CLAUDE.md + project detection + Git
+    ├── api/anthropic.ts   # Anthropic streaming provider
+    ├── api/openai.ts      # OpenAI-compatible provider (Kimi, DeepSeek, etc.)
+    ├── tools/             # 6 tools: bash, fileRead, fileEdit, fileWrite, grep, glob
+    └── utils/             # Config loading, Zod → JSON Schema
 ```
 
 ## Configuration
