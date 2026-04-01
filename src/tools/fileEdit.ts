@@ -1,5 +1,19 @@
 /**
  * FileEditTool - Edit files using search and replace
+ *
+ * @source ../src/tools/FileEditTool/FileEditTool.ts
+ * @source ../src/tools/FileEditTool/prompt.ts
+ *
+ * Original FileEditTool.ts has:
+ * - Fuzzy matching with Levenshtein distance for near-misses
+ * - File history tracking (before/after snapshots)
+ * - Commit attribution tracking
+ * - Lint diagnostics integration
+ * - Skill discovery from edited paths
+ * - React diff rendering
+ *
+ * Nano keeps: exact string replacement with ambiguity detection.
+ * Removed: fuzzy matching, file history, attribution, lint, skills.
  */
 
 import { readFile, writeFile } from "node:fs/promises";
@@ -7,6 +21,12 @@ import { resolve, relative } from "node:path";
 import { z } from "zod";
 import type { ToolContext, ToolDefinition, ToolResult } from "../types.js";
 
+/**
+ * Input schema.
+ * @source FileEditTool.ts - inputSchema
+ * Original has: file_path, old_string, new_string
+ * Nano adds: replace_all option
+ */
 const inputSchema = z.object({
   file_path: z.string().describe("The path of the file to edit"),
   old_string: z
@@ -34,6 +54,17 @@ export const FileEditTool: ToolDefinition = {
   ].join("\n"),
   inputSchema,
 
+  /** @source FileEditTool.ts - isReadOnly() { return false } */
+  isReadOnly() {
+    return false;
+  },
+
+  /**
+   * @source FileEditTool.ts - call()
+   * Original has: fuzzy matching fallback, file history snapshot,
+   * attribution tracking, lint check, skill discovery.
+   * Nano: exact match with ambiguity check.
+   */
   async call(
     rawInput: unknown,
     context: ToolContext
@@ -45,7 +76,6 @@ export const FileEditTool: ToolDefinition = {
     try {
       const content = await readFile(filePath, "utf-8");
 
-      // Check if old_string exists in the file
       if (!content.includes(input.old_string)) {
         return {
           output: `Error: old_string not found in ${displayPath}. Make sure it matches exactly (including whitespace and indentation). Read the file first to get the exact content.`,
@@ -74,11 +104,10 @@ export const FileEditTool: ToolDefinition = {
 
       await writeFile(filePath, newContent, "utf-8");
 
-      // Generate a simple diff summary
       const oldLines = input.old_string.split("\n").length;
       const newLines = input.new_string.split("\n").length;
       const output = [
-        `✓ Edited ${displayPath}`,
+        `\u2713 Edited ${displayPath}`,
         `  Replaced ${oldLines} line(s) with ${newLines} line(s)`,
       ].join("\n");
 

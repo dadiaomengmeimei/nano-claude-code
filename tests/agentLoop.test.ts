@@ -49,6 +49,9 @@ const EchoTool: ToolDefinition = {
     const input = rawInput as any;
     return { output: `Echo: ${input.message}` };
   },
+  isReadOnly() {
+    return false;
+  },
   formatResult(result) {
     return result.output;
   },

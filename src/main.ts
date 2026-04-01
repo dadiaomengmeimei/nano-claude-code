@@ -1,237 +1,108 @@
-#!/usr/bin/env node
-
 /**
- * nano-claude-code - A minimal AI coding assistant
+ * Main entry point - REPL and CLI
  *
- * Main entry point: handles terminal I/O and orchestrates the agent loop.
+ * @source ../src/main.tsx - main()
+ * @source ../src/entrypoints/cli.tsx - CLI entry point
+ *
+ * Original design:
+ * - React-based terminal UI (Ink framework)
+ * - Complex CLI argument parsing (commander.js)
+ * - Multiple modes: interactive, one-shot (-p), resume, MCP server
+ * - Session management (save/restore)
+ * - Telemetry and analytics
+ * - Update checker
+ * - Permission system initialization
+ *
+ * Nano keeps: simple readline REPL with streaming output.
+ * Removed: React UI, CLI args, session management, telemetry, updates.
  */
 
 import * as readline from "node:readline";
 import chalk from "chalk";
-import { loadConfig } from "./utils/config.js";
-import { AnthropicProvider } from "./api/anthropic.js";
-import { OpenAIProvider } from "./api/openai.js";
-import { ALL_TOOLS } from "./tools/index.js";
-import { collectContext } from "./context.js";
-import { buildSystemPrompt } from "./prompt.js";
+import { createProvider } from "./api/index.js";
 import { runAgentLoop } from "./agentLoop.js";
+import { buildSystemPrompt } from "./prompt.js";
+import { collectContext } from "./context.js";
 import { compactConversation, estimateTokens } from "./compact.js";
+import { ALL_TOOLS } from "./tools/index.js";
 import { configureSubAgent } from "./tools/subAgent.js";
-import type { Message, LLMProvider, ToolResult } from "./types.js";
+import type { Message, NanoConfig, ToolResult } from "./types.js";
 
-// ============================================================
-// Terminal UI helpers
-// ============================================================
+/**
+ * Token threshold for auto-compact.
+ * @source ../src/services/compact/autoCompact.ts - shouldAutoCompact()
+ * Original uses a dynamic threshold based on model's context window.
+ * Nano uses a fixed threshold.
+ */
+const AUTO_COMPACT_THRESHOLD = 80000;
 
-const BANNER = `
-${chalk.bold.cyan("nano-claude-code")} ${chalk.dim("v0.2.0")}
-${chalk.dim("A minimal AI coding assistant")}
-${chalk.dim("Type your message, or use:")}
-  ${chalk.yellow("/help")}    - Show commands
-  ${chalk.yellow("/clear")}   - Clear conversation
-  ${chalk.yellow("/compact")} - Summarize conversation to save tokens
-  ${chalk.yellow("/exit")}    - Quit
-${"\u2500".repeat(50)}
-`;
+/**
+ * Load configuration from environment variables.
+ *
+ * @source ../src/utils/config.ts - loadConfig()
+ * Original reads from ~/.claude/config.json, env vars, CLI args.
+ * Nano reads from env vars only.
+ */
+function loadConfig(): NanoConfig {
+  const provider = (process.env.NANO_PROVIDER || "anthropic") as "anthropic" | "openai";
+  const model = process.env.NANO_MODEL || "claude-sonnet-4-20250514";
+  const maxTokens = parseInt(process.env.NANO_MAX_TOKENS || "16384", 10);
+  const apiKey =
+    process.env.NANO_API_KEY ||
+    process.env.ANTHROPIC_API_KEY ||
+    process.env.OPENAI_API_KEY ||
+    "";
+  const baseURL = process.env.NANO_BASE_URL || "https://api.openai.com/v1";
+  const permissionMode = (process.env.NANO_PERMISSION_MODE || "ask") as "ask" | "auto";
 
-function printToolCall(name: string, input: Record<string, unknown>) {
-  const summary = getToolSummary(name, input);
-  process.stdout.write(chalk.dim(`\n\u26A1 ${name}: ${summary}\n`));
-}
-
-function printToolResult(name: string, result: ToolResult) {
-  if (result.isError) {
-    process.stdout.write(chalk.red(`  \u2717 Error\n`));
-  } else {
-    // Show a brief summary
-    const lines = result.output.split("\n");
-    const preview = lines[0]?.slice(0, 80) || "(empty)";
-    process.stdout.write(chalk.green(`  \u2713 `) + chalk.dim(preview) + "\n");
-  }
-}
-
-function getToolSummary(name: string, input: Record<string, unknown>): string {
-  switch (name) {
-    case "Bash":
-      return String(input.command || "").slice(0, 60);
-    case "FileRead":
-      return String(input.file_path || "");
-    case "FileEdit":
-      return String(input.file_path || "");
-    case "FileWrite":
-      return String(input.file_path || "");
-    case "Grep":
-      return `/${input.pattern}/ in ${input.path || "."}`;
-    case "Glob":
-      return `${input.pattern} in ${input.path || "."}`;
-    case "SubAgent":
-      return String(input.task || "").slice(0, 60);
-    default:
-      return JSON.stringify(input).slice(0, 60);
-  }
-}
-
-// ============================================================
-// Permission prompt
-// ============================================================
-
-async function askPermission(
-  rl: readline.Interface,
-  toolName: string,
-  input: Record<string, unknown>
-): Promise<boolean> {
-  const summary = getToolSummary(toolName, input);
-  process.stdout.write(
-    chalk.yellow(`\n\u26A0 Permission required: ${toolName}: ${summary}\n`)
-  );
-
-  // Show relevant details
-  if (toolName === "Bash") {
-    process.stdout.write(chalk.dim(`  Command: ${input.command}\n`));
-  } else if (toolName === "FileEdit") {
-    process.stdout.write(chalk.dim(`  File: ${input.file_path}\n`));
-  } else if (toolName === "FileWrite") {
-    process.stdout.write(chalk.dim(`  File: ${input.file_path}\n`));
-  } else if (toolName === "SubAgent") {
-    process.stdout.write(chalk.dim(`  Task: ${String(input.task || "").slice(0, 100)}\n`));
-  }
-
-  return new Promise<boolean>((resolve) => {
-    rl.question(chalk.yellow("  Allow? [y/N] "), (answer) => {
-      const allowed = answer.trim().toLowerCase() === "y";
-      if (!allowed) {
-        process.stdout.write(chalk.red("  Denied.\n"));
-      }
-      resolve(allowed);
-    });
-  });
-}
-
-// ============================================================
-// Slash commands
-// ============================================================
-
-interface SlashCommandContext {
-  provider: LLMProvider;
-  model: string;
-  maxTokens: number;
-}
-
-async function handleSlashCommand(
-  cmd: string,
-  conversationMessages: Message[],
-  ctx?: SlashCommandContext
-): Promise<{ handled: boolean; shouldExit?: boolean; messages?: Message[] }> {
-  const trimmed = cmd.trim().toLowerCase();
-
-  switch (trimmed) {
-    case "/help":
-      console.log(`
-${chalk.bold("Available commands:")}
-  ${chalk.yellow("/help")}    - Show this help
-  ${chalk.yellow("/clear")}   - Clear conversation history
-  ${chalk.yellow("/compact")} - Summarize conversation to save tokens
-  ${chalk.yellow("/history")} - Show conversation summary
-  ${chalk.yellow("/exit")}    - Quit (also Ctrl+C)
-`);
-      return { handled: true };
-
-    case "/clear":
-      console.log(chalk.dim("Conversation cleared."));
-      return { handled: true, messages: [] };
-
-    case "/compact": {
-      if (!ctx) {
-        console.log(chalk.red("Compact not available."));
-        return { handled: true };
-      }
-
-      const tokensBefore = estimateTokens(conversationMessages);
-      console.log(chalk.dim(`\nCompacting conversation (${conversationMessages.length} messages, ~${tokensBefore} tokens)...`));
-
-      try {
-        const result = await compactConversation(
-          conversationMessages,
-          ctx.provider,
-          ctx.model,
-          ctx.maxTokens
-        );
-
-        if (result.summary) {
-          console.log(chalk.green(`\n\u2713 Compacted: ${result.beforeTokens} \u2192 ${result.afterTokens} tokens (${Math.round((1 - result.afterTokens / result.beforeTokens) * 100)}% reduction)`));
-          console.log(chalk.dim(`  ${result.messages.length} messages remaining`));
-          return { handled: true, messages: result.messages };
-        } else {
-          console.log(chalk.yellow("Conversation too short to compact."));
-          return { handled: true };
-        }
-      } catch (err: any) {
-        console.log(chalk.red(`Compact failed: ${err.message}`));
-        return { handled: true };
-      }
-    }
-
-    case "/history": {
-      const userMsgs = conversationMessages.filter((m) => m.role === "user");
-      const assistantMsgs = conversationMessages.filter(
-        (m) => m.role === "assistant"
-      );
-      const tokens = estimateTokens(conversationMessages);
-      console.log(
-        chalk.dim(
-          `Conversation: ${userMsgs.length} user messages, ${assistantMsgs.length} assistant messages, ~${tokens} tokens`
-        )
-      );
-      return { handled: true };
-    }
-
-    case "/exit":
-    case "/quit":
-    case "/q":
-      return { handled: true, shouldExit: true };
-
-    default:
-      if (trimmed.startsWith("/")) {
-        console.log(chalk.red(`Unknown command: ${trimmed}. Type /help for available commands.`));
-        return { handled: true };
-      }
-      return { handled: false };
-  }
-}
-
-// ============================================================
-// Main
-// ============================================================
-
-async function main() {
-  // Load config
-  const config = await loadConfig();
-
-  // Validate API key
-  if (!config.apiKey) {
+  if (!apiKey) {
     console.error(
       chalk.red(
-        "Error: No API key found. Set NANO_API_KEY (or ANTHROPIC_API_KEY) environment variable, or add apiKey to ~/.nano-claude.json"
+        "Error: No API key found. Set NANO_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY."
       )
     );
     process.exit(1);
   }
 
-  // Initialize provider
-  let provider: LLMProvider;
-  if (config.provider === "anthropic") {
-    provider = new AnthropicProvider(config.apiKey);
-  } else if (config.provider === "openai") {
-    provider = new OpenAIProvider({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL,
-    });
-  } else {
-    console.error(chalk.red(`Unsupported provider: ${config.provider}`));
-    process.exit(1);
-  }
+  return { provider, model, maxTokens, apiKey, baseURL, permissionMode };
+}
 
-  // Configure SubAgent with current provider and settings
+/**
+ * Ask user for permission to execute a tool.
+ *
+ * @source ../src/hooks/useCanUseTool.ts - permission prompt
+ * Original has a rich React-based permission UI with diff preview.
+ * Nano uses simple readline prompt.
+ */
+async function askPermission(
+  rl: readline.Interface,
+  toolName: string,
+  input: Record<string, unknown>
+): Promise<boolean> {
+  const preview = JSON.stringify(input, null, 2).slice(0, 200);
+  console.log(chalk.yellow(`\n\u26a0 Tool: ${toolName}`));
+  console.log(chalk.dim(preview));
+
+  return new Promise((resolve) => {
+    rl.question(chalk.yellow("Allow? [y/N] "), (answer) => {
+      resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
+    });
+  });
+}
+
+/**
+ * Main REPL loop.
+ *
+ * @source ../src/main.tsx - main()
+ * Original initializes React app, session, telemetry, etc.
+ * Nano runs a simple readline loop.
+ */
+async function main() {
+  const config = loadConfig();
+  const provider = createProvider(config);
+  const cwd = process.cwd();
+
+  // Configure sub-agent
   configureSubAgent({
     provider,
     model: config.model,
@@ -240,138 +111,130 @@ async function main() {
   });
 
   // Collect project context
-  const cwd = process.cwd();
   const projectContext = await collectContext(cwd);
   const systemPrompt = buildSystemPrompt(projectContext, cwd);
 
-  // Print banner
-  console.log(BANNER);
-  console.log(chalk.dim(`Provider: ${config.provider} | Model: ${config.model}`));
+  console.log(chalk.bold.cyan("\n\u2728 nano-claude-code"));
+  console.log(chalk.dim(`Model: ${config.model} | Provider: ${config.provider}`));
   console.log(chalk.dim(`Working directory: ${cwd}`));
-  console.log(chalk.dim(`Permission mode: ${config.permissionMode}`));
-  console.log(chalk.dim(`Tools: ${ALL_TOOLS.map((t) => t.name).join(", ")}\n`));
+  console.log(chalk.dim('Type "exit" to quit, "/compact" to summarize conversation.\n'));
 
-  // Setup readline
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: chalk.bold.cyan("\n\u276F "),
   });
 
-  let conversationMessages: Message[] = [];
+  // Conversation history
+  // @source main.tsx: messages state managed by React
+  let messages: Message[] = [];
 
-  // Slash command context for /compact
-  const slashCtx: SlashCommandContext = {
-    provider,
-    model: config.model,
-    maxTokens: config.maxTokens,
-  };
+  const prompt = () => {
+    rl.question(chalk.green("\n> "), async (input) => {
+      const trimmed = input.trim();
 
-  // Handle Ctrl+C gracefully
-  rl.on("SIGINT", () => {
-    console.log(chalk.dim("\nGoodbye!"));
-    process.exit(0);
-  });
+      if (!trimmed) {
+        prompt();
+        return;
+      }
 
-  // Check if input is piped (non-interactive mode)
-  const isPiped = !process.stdin.isTTY;
-
-  if (isPiped) {
-    // Non-interactive mode: read all stdin and process as a single message
-    let input = "";
-    for await (const line of rl) {
-      input += line + "\n";
-    }
-    input = input.trim();
-    if (!input) {
-      process.exit(0);
-    }
-
-    conversationMessages.push({ role: "user", content: input });
-
-    await runAgentLoop({
-      provider,
-      tools: ALL_TOOLS,
-      systemPrompt,
-      model: config.model,
-      maxTokens: config.maxTokens,
-      messages: conversationMessages,
-      toolContext: { cwd },
-      permissionMode: "auto", // Auto-allow in piped mode
-      onText: (text) => process.stdout.write(text),
-      onThinking: (text) => process.stderr.write(chalk.dim(text)),
-      onToolCall: printToolCall,
-      onToolResult: printToolResult,
-    });
-
-    console.log(); // Final newline
-    process.exit(0);
-  }
-
-  // Interactive mode
-  const promptUser = () => {
-    rl.prompt();
-  };
-
-  promptUser();
-
-  rl.on("line", async (line) => {
-    const input = line.trim();
-    if (!input) {
-      promptUser();
-      return;
-    }
-
-    // Handle slash commands
-    const cmdResult = await handleSlashCommand(input, conversationMessages, slashCtx);
-    if (cmdResult.handled) {
-      if (cmdResult.shouldExit) {
-        console.log(chalk.dim("Goodbye!"));
+      if (trimmed === "exit" || trimmed === "quit") {
+        console.log(chalk.dim("\nGoodbye!"));
+        rl.close();
         process.exit(0);
       }
-      if (cmdResult.messages !== undefined) {
-        conversationMessages = cmdResult.messages;
+
+      // @source ../src/commands/ - slash commands
+      if (trimmed === "/compact") {
+        console.log(chalk.dim("\nCompacting conversation..."));
+        const result = await compactConversation(
+          messages,
+          provider,
+          config.model,
+          config.maxTokens
+        );
+        messages = result.messages;
+        console.log(
+          chalk.dim(
+            `Compacted: ${result.beforeTokens} -> ${result.afterTokens} tokens`
+          )
+        );
+        prompt();
+        return;
       }
-      promptUser();
-      return;
-    }
 
-    // Add user message
-    conversationMessages.push({ role: "user", content: input });
+      // Add user message
+      messages.push({ role: "user", content: trimmed });
 
-    // Run agent loop
-    process.stdout.write("\n");
+      // Auto-compact check
+      // @source autoCompact.ts: shouldAutoCompact()
+      const currentTokens = estimateTokens(messages);
+      if (currentTokens > AUTO_COMPACT_THRESHOLD) {
+        console.log(chalk.dim("\n[Auto-compacting conversation...]"));
+        const result = await compactConversation(
+          messages,
+          provider,
+          config.model,
+          config.maxTokens
+        );
+        messages = result.messages;
+        // Re-add the user message after compact
+        messages.push({ role: "user", content: trimmed });
+        console.log(
+          chalk.dim(
+            `[Compacted: ${result.beforeTokens} -> ${result.afterTokens} tokens]`
+          )
+        );
+      }
 
-    try {
-      conversationMessages = await runAgentLoop({
-        provider,
-        tools: ALL_TOOLS,
-        systemPrompt,
-        model: config.model,
-        maxTokens: config.maxTokens,
-        messages: conversationMessages,
-        toolContext: { cwd },
-        permissionMode: config.permissionMode,
-        onText: (text) => process.stdout.write(text),
-        onThinking: (text) => {
-          // Show thinking in dim
-          process.stderr.write(chalk.dim(text));
-        },
-        onToolCall: printToolCall,
-        onToolResult: printToolResult,
-        askPermission: (toolName, toolInput) =>
-          askPermission(rl, toolName, toolInput),
-      });
-    } catch (err: any) {
-      console.error(chalk.red(`\nError: ${err.message}`));
-    }
+      try {
+        // Run agent loop
+        process.stdout.write(chalk.dim("\n"));
 
-    process.stdout.write("\n");
-    promptUser();
-  });
+        messages = await runAgentLoop({
+          provider,
+          tools: ALL_TOOLS,
+          systemPrompt,
+          model: config.model,
+          maxTokens: config.maxTokens,
+          messages,
+          toolContext: { cwd },
+          permissionMode: config.permissionMode,
+          onText: (text) => {
+            process.stdout.write(text);
+          },
+          onThinking: (text) => {
+            process.stdout.write(chalk.dim.italic(text));
+          },
+          onToolCall: (name, toolInput) => {
+            const summary = Object.entries(toolInput)
+              .map(([k, v]) => `${k}=${JSON.stringify(v).slice(0, 60)}`)
+              .join(", ");
+            console.log(chalk.blue(`\n\u25b6 ${name}(${summary})`));
+          },
+          onToolResult: (name, result) => {
+            if (result.isError) {
+              console.log(chalk.red(`\u2717 ${name} failed`));
+            } else {
+              const preview = result.output.split("\n")[0]?.slice(0, 80) || "";
+              console.log(chalk.green(`\u2713 ${name}: ${preview}`));
+            }
+          },
+          askPermission: (toolName, toolInput) =>
+            askPermission(rl, toolName, toolInput),
+        });
+
+        console.log(""); // Newline after response
+      } catch (err: any) {
+        console.error(chalk.red(`\nError: ${err.message}`));
+      }
+
+      prompt();
+    });
+  };
+
+  prompt();
 }
 
-// Run
 main().catch((err) => {
   console.error(chalk.red(`Fatal error: ${err.message}`));
   process.exit(1);

@@ -1,5 +1,8 @@
 /**
  * Utility to convert Zod schemas to JSON Schema for Anthropic API
+ *
+ * @source ../src/Tool.ts - inputJSONSchema() uses zodToJsonSchema package
+ * Nano has a hand-rolled version for educational purposes.
  */
 
 import { z } from "zod";

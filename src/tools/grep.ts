@@ -1,9 +1,20 @@
 /**
  * GrepTool - Search file contents using regex
+ *
+ * @source ../src/tools/GrepTool/GrepTool.ts
+ * @source ../src/tools/GrepTool/prompt.ts
+ *
+ * Original GrepTool.ts uses ripgrep (rg) directly with:
+ * - Configurable max results
+ * - File type filtering
+ * - Context lines
+ * - React rendering for search results
+ *
+ * Nano: same ripgrep-first approach with grep fallback.
  */
 
 import { execSync } from "node:child_process";
-import { resolve, relative } from "node:path";
+import { resolve } from "node:path";
 import { z } from "zod";
 import type { ToolContext, ToolDefinition, ToolResult } from "../types.js";
 
@@ -32,6 +43,11 @@ export const GrepTool: ToolDefinition = {
   ].join("\n"),
   inputSchema,
 
+  /** @source GrepTool.ts - isReadOnly() { return true } */
+  isReadOnly() {
+    return true;
+  },
+
   async call(
     rawInput: unknown,
     context: ToolContext
@@ -41,7 +57,6 @@ export const GrepTool: ToolDefinition = {
       ? resolve(context.cwd, input.path)
       : context.cwd;
 
-    // Try ripgrep first, fall back to grep
     const useRg = hasCommand("rg");
     let cmd: string;
 
@@ -77,7 +92,6 @@ export const GrepTool: ToolDefinition = {
         .trim()
         .split("\n")
         .map((line) => {
-          // Replace absolute paths with relative ones
           if (line.startsWith(context.cwd)) {
             return line.slice(context.cwd.length + 1);
           }
@@ -87,12 +101,10 @@ export const GrepTool: ToolDefinition = {
           return line;
         });
 
-      const matchCount = lines.length;
       return {
-        output: `Found ${matchCount} match(es):\n\n${lines.join("\n")}`,
+        output: `Found ${lines.length} match(es):\n\n${lines.join("\n")}`,
       };
     } catch (err: any) {
-      // grep returns exit code 1 when no matches found
       if (err.status === 1) {
         return { output: "No matches found." };
       }

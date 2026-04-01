@@ -1,5 +1,8 @@
 /**
  * Configuration management
+ *
+ * @source ../src/utils/config.ts - loadConfig()
+ * @source ../src/constants/config.ts - DEFAULT_CONFIG
  */
 
 import { readFile } from "node:fs/promises";

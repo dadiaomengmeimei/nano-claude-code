@@ -1,105 +1,126 @@
 /**
- * Anthropic API provider - handles streaming communication with Claude
+ * Anthropic API Provider - Direct Anthropic SDK integration
+ *
+ * @source ../src/services/api/claude.ts - createApiClient(), streamMessage()
+ *
+ * Original design:
+ * - Uses Anthropic SDK with streaming (messages.stream())
+ * - Implements prompt caching via cache_control boundaries
+ * - Handles 413 (prompt_too_long) with reactive compact
+ * - Handles 529 (overloaded) with retry
+ * - Handles max_tokens recovery
+ * - Supports beta features (extended thinking, token counting)
+ * - Converts tools to Anthropic format with cache_control
+ *
+ * Nano keeps: streaming via SDK, tool conversion.
+ * Removed: prompt caching, 413/529 recovery, beta features.
  */
 
 import Anthropic from "@anthropic-ai/sdk";
-import type {
-  LLMProvider,
-  ProviderOptions,
-  StreamEvent,
-  ToolDefinition,
-} from "../types.js";
-import { zodToJsonSchema } from "../utils/schema.js";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import type { LLMProvider, ProviderOptions, StreamEvent, ToolDefinition } from "../types.js";
 
-export class AnthropicProvider implements LLMProvider {
-  name = "anthropic";
-  private client: Anthropic;
+/**
+ * Convert nano ToolDefinition to Anthropic API tool format.
+ *
+ * @source ../src/services/api/claude.ts - tools are converted with
+ * cache_control boundaries for prompt caching optimization.
+ * Nano does a simple conversion without cache_control.
+ */
+function toAnthropicTool(tool: ToolDefinition): Anthropic.Tool {
+  const jsonSchema = zodToJsonSchema(tool.inputSchema, { target: "openApi3" });
+  return {
+    name: tool.name,
+    description: tool.description,
+    input_schema: {
+      type: "object" as const,
+      properties: (jsonSchema as any).properties || {},
+      required: (jsonSchema as any).required || [],
+    },
+  };
+}
 
-  constructor(apiKey: string) {
-    this.client = new Anthropic({ apiKey });
-  }
+/**
+ * Create an Anthropic provider.
+ *
+ * @source ../src/services/api/claude.ts - createApiClient()
+ * Original creates a singleton client with retry config.
+ */
+export function createAnthropicProvider(apiKey: string): LLMProvider {
+  const client = new Anthropic({ apiKey });
 
-  async *stream(options: ProviderOptions): AsyncIterable<StreamEvent> {
-    const tools = options.tools.map((t) => this.convertTool(t));
+  return {
+    name: "anthropic",
 
-    // Convert messages to Anthropic format, filtering out thinking blocks
-    // (thinking blocks are output-only and should not be sent back)
-    const messages: Anthropic.Messages.MessageParam[] = options.messages.map((m) => {
-      if (typeof m.content === "string") {
-        return { role: m.role as "user" | "assistant", content: m.content };
-      }
-      // Convert content blocks to Anthropic format
-      const content = (m.content as any[])
-        .filter((block) => block.type !== "thinking") // Filter out thinking blocks
-        .map((block) => {
-          if (block.type === "tool_result") {
-            return {
-              type: "tool_result" as const,
-              tool_use_id: block.tool_use_id,
-              content: block.content,
-              ...(block.is_error ? { is_error: true as const } : {}),
-            };
-          }
-          if (block.type === "tool_use") {
-            return {
-              type: "tool_use" as const,
-              id: block.id,
-              name: block.name,
-              input: block.input,
-            };
-          }
-          return { type: "text" as const, text: block.text || "" };
+    /**
+     * Stream a message using the Anthropic SDK.
+     *
+     * @source ../src/services/api/claude.ts - streamMessage()
+     * Original uses messages.stream() with event handlers for:
+     * - message_start, content_block_start, content_block_delta,
+     *   content_block_stop, message_stop, error
+     * Plus special handling for tool_use blocks and thinking blocks.
+     * Nano maps the same events to our StreamEvent type.
+     */
+    async *stream(options: ProviderOptions): AsyncIterable<StreamEvent> {
+      const tools = options.tools.map(toAnthropicTool);
+
+      try {
+        const stream = client.messages.stream({
+          model: options.model,
+          max_tokens: options.maxTokens,
+          system: options.systemPrompt,
+          messages: options.messages.map((m) => ({
+            role: m.role,
+            content: m.content as any,
+          })),
+          tools: tools.length > 0 ? tools : undefined,
         });
-      return { role: m.role as "user" | "assistant", content };
-    });
 
-    try {
-      const stream = this.client.messages.stream({
-        model: options.model,
-        max_tokens: options.maxTokens,
-        system: options.systemPrompt,
-        messages,
-        tools: tools.length > 0 ? tools : undefined,
-      });
+        // @source claude.ts - event handling via stream.on()
+        for await (const event of stream) {
+          switch (event.type) {
+            case "content_block_start":
+              if (event.content_block.type === "tool_use") {
+                yield {
+                  type: "tool_use_start",
+                  toolUseId: event.content_block.id,
+                  toolName: event.content_block.name,
+                };
+              } else if (event.content_block.type === "thinking") {
+                yield { type: "thinking", text: "" };
+              }
+              break;
 
-      for await (const event of stream) {
-        if (event.type === "content_block_start") {
-          const block = event.content_block as any;
-          if (block.type === "tool_use") {
-            yield {
-              type: "tool_use_start",
-              toolUseId: block.id,
-              toolName: block.name,
-            };
-          } else if (block.type === "thinking") {
-            yield { type: "thinking", text: "" };
+            case "content_block_delta":
+              if (event.delta.type === "text_delta") {
+                yield { type: "text", text: event.delta.text };
+              } else if (event.delta.type === "input_json_delta") {
+                yield {
+                  type: "tool_input_delta",
+                  inputDelta: event.delta.partial_json,
+                };
+              } else if (event.delta.type === "thinking_delta") {
+                yield { type: "thinking", text: (event.delta as any).thinking };
+              }
+              break;
+
+            case "content_block_stop":
+              // Check if the stopped block was a tool_use
+              const msg = (stream as any).currentMessage;
+              if (msg?.content?.[event.index]?.type === "tool_use") {
+                yield { type: "tool_use_end" };
+              }
+              break;
+
+            case "message_stop":
+              yield { type: "done" };
+              break;
           }
-        } else if (event.type === "content_block_delta") {
-          const delta = event.delta as any;
-          if (delta.type === "text_delta") {
-            yield { type: "text", text: delta.text };
-          } else if (delta.type === "input_json_delta") {
-            yield { type: "tool_input_delta", inputDelta: delta.partial_json };
-          } else if (delta.type === "thinking_delta") {
-            yield { type: "thinking", text: delta.thinking };
-          }
-        } else if (event.type === "content_block_stop") {
-          yield { type: "tool_use_end" };
-        } else if (event.type === "message_stop") {
-          yield { type: "done" };
         }
+      } catch (err: any) {
+        yield { type: "error", error: err.message };
       }
-    } catch (err: any) {
-      yield { type: "error", error: err.message || String(err) };
-    }
-  }
-
-  private convertTool(tool: ToolDefinition): Anthropic.Messages.Tool {
-    const jsonSchema = zodToJsonSchema(tool.inputSchema);
-    return {
-      name: tool.name,
-      description: tool.description,
-      input_schema: jsonSchema as Anthropic.Messages.Tool.InputSchema,
-    };
-  }
+    },
+  };
 }

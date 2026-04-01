@@ -1,11 +1,32 @@
 /**
  * BashTool - Execute shell commands
+ *
+ * @source ../src/tools/BashTool/BashTool.tsx
+ * @source ../src/tools/BashTool/prompt.ts
+ *
+ * Original BashTool.tsx is ~800 lines with:
+ * - Complex input schema (command, description, timeout, run_in_background)
+ * - Sandbox mode (macOS seatbelt, Linux landlock)
+ * - Background task support
+ * - Sed edit parsing and validation
+ * - Read-only command detection (bashSecurity.ts ~100KB)
+ * - Output truncation and persistence
+ * - React rendering for terminal UI
+ *
+ * Nano keeps: command execution, timeout, output truncation.
+ * Removed: sandbox, background tasks, sed parsing, security classifier.
  */
 
 import { exec } from "node:child_process";
 import { z } from "zod";
 import type { ToolContext, ToolDefinition, ToolResult } from "../types.js";
 
+/**
+ * Input schema.
+ * @source BashTool.tsx - fullInputSchema()
+ * Original has: command, description, timeout, run_in_background, _simulatedSedEdit
+ * Nano keeps: command, timeout
+ */
 const inputSchema = z.object({
   command: z.string().describe("The bash command to execute"),
   timeout: z
@@ -28,6 +49,22 @@ export const BashTool: ToolDefinition = {
   ].join("\n"),
   inputSchema,
 
+  /**
+   * @source BashTool.tsx - isReadOnly(input)
+   * Original uses checkReadOnlyConstraints() from bashSecurity.ts which
+   * analyzes the command string with regex patterns. Nano returns false
+   * (all bash commands require permission).
+   */
+  isReadOnly() {
+    return false;
+  },
+
+  /**
+   * @source BashTool.tsx - call()
+   * Original has: sandbox execution, background task handling, output
+   * persistence, structured content blocks, sed edit tracking.
+   * Nano: simple exec() with timeout and output truncation.
+   */
   async call(
     rawInput: unknown,
     context: ToolContext
@@ -50,6 +87,7 @@ export const BashTool: ToolDefinition = {
           const stderrStr = String(stderr || "");
 
           // Truncate output if too large
+          // @source BashTool.tsx - maxResultSizeChars: 30_000
           const maxLen = 30000;
           if (stdoutStr.length > maxLen) {
             stdoutStr =

@@ -1,5 +1,12 @@
 /**
  * FileWriteTool - Write/create files
+ *
+ * @source ../src/tools/FileWriteTool/FileWriteTool.ts
+ * @source ../src/tools/FileWriteTool/prompt.ts
+ *
+ * Original has: file history tracking, commit attribution,
+ * skill discovery, React rendering.
+ * Nano keeps: file creation with auto-mkdir.
  */
 
 import { writeFile, mkdir, stat } from "node:fs/promises";
@@ -25,6 +32,10 @@ export const FileWriteTool: ToolDefinition = {
   ].join("\n"),
   inputSchema,
 
+  isReadOnly() {
+    return false;
+  },
+
   async call(
     rawInput: unknown,
     context: ToolContext
@@ -34,7 +45,6 @@ export const FileWriteTool: ToolDefinition = {
     const displayPath = relative(context.cwd, filePath);
 
     try {
-      // Check if file already exists
       let isNew = true;
       try {
         await stat(filePath);
@@ -46,13 +56,12 @@ export const FileWriteTool: ToolDefinition = {
       // Ensure parent directory exists
       await mkdir(dirname(filePath), { recursive: true });
 
-      // Write the file
       await writeFile(filePath, input.content, "utf-8");
 
       const lineCount = input.content.split("\n").length;
       const action = isNew ? "Created" : "Wrote";
       return {
-        output: `✓ ${action} ${displayPath} (${lineCount} lines)`,
+        output: `\u2713 ${action} ${displayPath} (${lineCount} lines)`,
       };
     } catch (err: any) {
       return {

@@ -1,3 +1,8 @@
+/**
+ * @source ../src/utils/log.ts - log(), logError()
+ * Original uses structured logging. Nano uses simple ANSI console output.
+ */
+
 // ANSI 颜色代码
 const colors = {
   reset: '\x1b[0m',

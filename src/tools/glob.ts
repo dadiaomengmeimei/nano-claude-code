@@ -1,9 +1,16 @@
 /**
  * GlobTool - Find files by name pattern
+ *
+ * @source ../src/tools/GlobTool/GlobTool.ts
+ * @source ../src/tools/GlobTool/prompt.ts
+ *
+ * Original has: configurable max results via globLimits,
+ * React rendering for file lists.
+ * Nano: same glob with standard ignore patterns.
  */
 
 import { glob } from "glob";
-import { resolve, relative } from "node:path";
+import { resolve } from "node:path";
 import { z } from "zod";
 import type { ToolContext, ToolDefinition, ToolResult } from "../types.js";
 
@@ -26,6 +33,11 @@ export const GlobTool: ToolDefinition = {
     "- Common patterns: '**/*.ts' (all TypeScript files), 'src/**' (all files in src)",
   ].join("\n"),
   inputSchema,
+
+  /** @source GlobTool.ts - isReadOnly() { return true } */
+  isReadOnly() {
+    return true;
+  },
 
   async call(
     rawInput: unknown,
@@ -52,7 +64,6 @@ export const GlobTool: ToolDefinition = {
         maxDepth: 20,
       });
 
-      // Sort and limit
       const sorted = files.sort();
       const limited = sorted.slice(0, 100);
       const truncated = sorted.length > 100;

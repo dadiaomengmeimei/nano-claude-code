@@ -1,256 +1,158 @@
 /**
- * OpenAI-compatible API provider
+ * OpenAI-compatible API Provider
  *
- * Works with any OpenAI-compatible API (Kimi, DeepSeek, OpenAI, Ollama, etc.)
- * Uses raw fetch + SSE parsing to avoid extra dependencies.
+ * @source Not directly from Claude Code (which only supports Anthropic API)
+ * This is a nano-specific addition to support OpenAI-compatible APIs
+ * (OpenAI, Moonshot, DeepSeek, local LLMs via Ollama/vLLM, etc.)
+ *
+ * Design follows the same streaming pattern as the Anthropic provider,
+ * mapping OpenAI's SSE events to our unified StreamEvent type.
  */
 
-import type {
-  LLMProvider,
-  ProviderOptions,
-  StreamEvent,
-  ToolDefinition,
-} from "../types.js";
-import { zodToJsonSchema } from "../utils/schema.js";
+import { zodToJsonSchema } from "zod-to-json-schema";
+import type { LLMProvider, ProviderOptions, StreamEvent, ToolDefinition } from "../types.js";
 
-export interface OpenAIProviderConfig {
-  apiKey: string;
-  baseURL: string;
+/**
+ * Convert nano ToolDefinition to OpenAI function calling format.
+ */
+function toOpenAITool(tool: ToolDefinition) {
+  const jsonSchema = zodToJsonSchema(tool.inputSchema, { target: "openApi3" });
+  return {
+    type: "function" as const,
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: {
+        type: "object",
+        properties: (jsonSchema as any).properties || {},
+        required: (jsonSchema as any).required || [],
+      },
+    },
+  };
 }
 
-export class OpenAIProvider implements LLMProvider {
-  name = "openai";
-  private apiKey: string;
-  private baseURL: string;
+/**
+ * Create an OpenAI-compatible provider.
+ */
+export function createOpenAIProvider(apiKey: string, baseURL: string): LLMProvider {
+  return {
+    name: "openai",
 
-  constructor(config: OpenAIProviderConfig) {
-    this.apiKey = config.apiKey;
-    // Remove trailing slash
-    this.baseURL = config.baseURL.replace(/\/+$/, "");
-  }
+    async *stream(options: ProviderOptions): AsyncIterable<StreamEvent> {
+      const tools = options.tools.map(toOpenAITool);
 
-  async *stream(options: ProviderOptions): AsyncIterable<StreamEvent> {
-    const tools = options.tools.map((t) => this.convertTool(t));
+      const body: Record<string, unknown> = {
+        model: options.model,
+        max_tokens: options.maxTokens,
+        stream: true,
+        messages: [
+          { role: "system", content: options.systemPrompt },
+          ...options.messages.map((m) => ({
+            role: m.role,
+            content: typeof m.content === "string" ? m.content : JSON.stringify(m.content),
+          })),
+        ],
+      };
 
-    // Build messages in OpenAI format
-    const messages: any[] = [
-      { role: "system", content: options.systemPrompt },
-    ];
+      if (tools.length > 0) {
+        body.tools = tools;
+      }
 
-    for (const m of options.messages) {
-      if (typeof m.content === "string") {
-        messages.push({ role: m.role, content: m.content });
-      } else {
-        // Convert content blocks to OpenAI format
-        const blocks = m.content as any[];
+      try {
+        const response = await fetch(`${baseURL}/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+          signal: options.signal,
+        });
 
-        if (m.role === "assistant") {
-          // Assistant message: may contain text + tool_calls + thinking
-          let textContent = "";
-          let reasoningContent = "";
-          const toolCalls: any[] = [];
-          let toolCallIndex = 0;
-
-          for (const block of blocks) {
-            if (block.type === "text") {
-              textContent += block.text;
-            } else if (block.type === "tool_use") {
-              toolCalls.push({
-                id: block.id,
-                type: "function",
-                function: {
-                  name: block.name,
-                  arguments: JSON.stringify(block.input),
-                },
-                index: toolCallIndex++,
-              });
-            } else if (block.type === "thinking") {
-              reasoningContent += block.thinking;
-            }
-          }
-
-          const msg: any = { role: "assistant" };
-          if (textContent) msg.content = textContent;
-          if (toolCalls.length > 0) msg.tool_calls = toolCalls;
-          if (!textContent && toolCalls.length === 0) msg.content = "";
-          // Kimi K2.5 and similar models require reasoning_content in assistant
-          // messages when thinking/reasoning is enabled
-          if (reasoningContent) msg.reasoning_content = reasoningContent;
-          messages.push(msg);
-        } else if (m.role === "user") {
-          // User message: may contain tool_result blocks
-          for (const block of blocks) {
-            if (block.type === "tool_result") {
-              messages.push({
-                role: "tool",
-                tool_call_id: block.tool_use_id,
-                content: block.content,
-              });
-            } else if (block.type === "text") {
-              messages.push({ role: "user", content: block.text });
-            }
-          }
+        if (!response.ok) {
+          const errorText = await response.text();
+          yield { type: "error", error: `HTTP ${response.status}: ${errorText}` };
+          return;
         }
-      }
-    }
 
-    const body: any = {
-      model: options.model,
-      messages,
-      stream: true,
-      max_tokens: options.maxTokens,
-    };
+        const reader = response.body?.getReader();
+        if (!reader) {
+          yield { type: "error", error: "No response body" };
+          return;
+        }
 
-    if (tools.length > 0) {
-      body.tools = tools;
-      body.tool_choice = "auto";
-    }
+        const decoder = new TextDecoder();
+        let buffer = "";
+        const toolCallBuffers: Map<number, { id: string; name: string; args: string }> = new Map();
 
-    try {
-      const response = await fetch(`${this.baseURL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: options.signal,
-      });
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        yield { type: "error", error: `HTTP ${response.status}: ${errorText}` };
-        return;
-      }
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
 
-      if (!response.body) {
-        yield { type: "error", error: "No response body" };
-        return;
-      }
-
-      // Parse SSE stream
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      // Track active tool calls by index
-      const activeToolCalls = new Map<
-        number,
-        { id: string; name: string; arguments: string }
-      >();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-
-        // Process complete SSE lines
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || ""; // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === "data: [DONE]") {
-            if (trimmed === "data: [DONE]") {
-              // Finalize any pending tool calls
-              for (const [index, tc] of activeToolCalls) {
-                yield {
-                  type: "tool_use_end",
-                };
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const data = line.slice(6).trim();
+            if (data === "[DONE]") {
+              // Flush any pending tool calls
+              for (const [, tc] of toolCallBuffers) {
+                yield { type: "tool_use_end" };
               }
-              activeToolCalls.clear();
               yield { type: "done" };
+              continue;
             }
-            continue;
-          }
 
-          if (!trimmed.startsWith("data: ")) continue;
+            try {
+              const chunk = JSON.parse(data);
+              const delta = chunk.choices?.[0]?.delta;
+              if (!delta) continue;
 
-          let data: any;
-          try {
-            data = JSON.parse(trimmed.slice(6));
-          } catch {
-            continue;
-          }
+              // Text content
+              if (delta.content) {
+                yield { type: "text", text: delta.content };
+              }
 
-          const choice = data.choices?.[0];
-          if (!choice) continue;
+              // Tool calls
+              if (delta.tool_calls) {
+                for (const tc of delta.tool_calls) {
+                  const idx = tc.index ?? 0;
 
-          const delta = choice.delta;
-          if (!delta) continue;
-
-          // Handle reasoning/thinking content (Kimi K2.5, DeepSeek, etc.)
-          if (delta.reasoning_content) {
-            yield { type: "thinking", text: delta.reasoning_content };
-          }
-
-          // Handle text content
-          if (delta.content) {
-            yield { type: "text", text: delta.content };
-          }
-
-          // Handle tool calls
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
-
-              if (tc.id) {
-                // New tool call starting
-                activeToolCalls.set(idx, {
-                  id: tc.id,
-                  name: tc.function?.name || "",
-                  arguments: tc.function?.arguments || "",
-                });
-                yield {
-                  type: "tool_use_start",
-                  toolUseId: tc.id,
-                  toolName: tc.function?.name || "",
-                };
-              } else if (activeToolCalls.has(idx)) {
-                // Continuing an existing tool call
-                const existing = activeToolCalls.get(idx)!;
-                if (tc.function?.arguments) {
-                  existing.arguments += tc.function.arguments;
-                  yield {
-                    type: "tool_input_delta",
-                    inputDelta: tc.function.arguments,
-                  };
+                  if (tc.id) {
+                    // New tool call
+                    toolCallBuffers.set(idx, {
+                      id: tc.id,
+                      name: tc.function?.name || "",
+                      args: tc.function?.arguments || "",
+                    });
+                    yield {
+                      type: "tool_use_start",
+                      toolUseId: tc.id,
+                      toolName: tc.function?.name || "",
+                    };
+                  } else if (tc.function?.arguments) {
+                    // Continuation of arguments
+                    const existing = toolCallBuffers.get(idx);
+                    if (existing) {
+                      existing.args += tc.function.arguments;
+                    }
+                    yield {
+                      type: "tool_input_delta",
+                      inputDelta: tc.function.arguments,
+                    };
+                  }
                 }
               }
-            }
-          }
-
-          // Handle finish_reason
-          if (choice.finish_reason === "tool_calls" || choice.finish_reason === "stop") {
-            // Finalize pending tool calls
-            for (const [index, tc] of activeToolCalls) {
-              yield { type: "tool_use_end" };
-            }
-            activeToolCalls.clear();
-
-            if (choice.finish_reason === "stop") {
-              yield { type: "done" };
+            } catch {
+              // Skip malformed JSON
             }
           }
         }
+      } catch (err: any) {
+        yield { type: "error", error: err.message };
       }
-    } catch (err: any) {
-      yield { type: "error", error: err.message || String(err) };
-    }
-  }
-
-  private convertTool(
-    tool: ToolDefinition
-  ): { type: "function"; function: { name: string; description: string; parameters: any } } {
-    const jsonSchema = zodToJsonSchema(tool.inputSchema);
-    return {
-      type: "function",
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: jsonSchema,
-      },
-    };
-  }
+    },
+  };
 }

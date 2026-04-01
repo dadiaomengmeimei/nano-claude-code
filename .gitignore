@@ -4,3 +4,4 @@ dist/
 *.d.ts
 .DS_Store
 .env
+__e2e_test_*

@@ -1,9 +1,21 @@
 /**
  * SubAgent Tool - Spawn a sub-agent to handle complex subtasks
  *
- * This mirrors Claude Code's "Task" tool. The main agent can delegate
- * work to a sub-agent that has its own conversation context and tool access.
- * The sub-agent runs to completion and returns a summary.
+ * @source ../src/tools/AgentTool/AgentTool.tsx
+ * @source ../src/tools/AgentTool/runAgent.ts
+ * @source ../src/tools/AgentTool/built-in/generalPurposeAgent.ts
+ *
+ * Original AgentTool is a complex system with:
+ * - Multiple built-in agent types (Explore, Plan, Code, etc.)
+ * - User-defined agents from .claude/agents/ directory
+ * - Fork mode (cache-sharing with parent)
+ * - Coordinator pattern for multi-agent orchestration
+ * - Agent memory and snapshot system
+ * - Per-agent tool filtering and model selection
+ * - Resume/background agent support
+ *
+ * Nano keeps: single general-purpose sub-agent with tool filtering.
+ * Removed: agent types, fork mode, coordinator, memory, resume.
  */
 
 import { z } from "zod";
@@ -19,6 +31,7 @@ const inputSchema = z.object({
 });
 
 // These will be injected at registration time
+// @source AgentTool.tsx - agent configuration is passed via toolUseContext.options
 let _provider: LLMProvider | null = null;
 let _model: string = "";
 let _maxTokens: number = 16384;
@@ -27,6 +40,10 @@ let _allTools: ToolDefinition[] = [];
 /**
  * Configure the sub-agent with the current provider and settings.
  * Must be called before the tool is used.
+ *
+ * @source ../src/tools/AgentTool/runAgent.ts - runAgent()
+ * Original receives configuration through toolUseContext.options.
+ * Nano uses module-level state for simplicity.
  */
 export function configureSubAgent(opts: {
   provider: LLMProvider;
@@ -61,6 +78,16 @@ export const SubAgentTool: ToolDefinition = {
   ].join("\n"),
   inputSchema,
 
+  isReadOnly() {
+    return false;
+  },
+
+  /**
+   * @source ../src/tools/AgentTool/runAgent.ts - runAgent()
+   * Original has: agent type selection, fork mode, cache sharing,
+   * model override, tool filtering, memory injection, resume support.
+   * Nano: simple sub-loop with filtered tools (no SubAgent to prevent recursion).
+   */
   async call(
     rawInput: unknown,
     context: ToolContext
@@ -78,7 +105,6 @@ export const SubAgentTool: ToolDefinition = {
     const projectContext = await collectContext(context.cwd);
     const systemPrompt = buildSystemPrompt(projectContext, context.cwd);
 
-    // Create sub-agent conversation with the task
     const messages: Message[] = [
       {
         role: "user",
@@ -86,12 +112,12 @@ export const SubAgentTool: ToolDefinition = {
       },
     ];
 
-    // Collect sub-agent output
     let fullOutput = "";
     const toolActions: string[] = [];
 
     try {
       // Filter out SubAgent from available tools to prevent infinite recursion
+      // @source AgentTool.tsx - tools are filtered per agent type
       const subTools = _allTools.filter((t) => t.name !== "SubAgent");
 
       const result = await runAgentLoop({
@@ -106,14 +132,13 @@ export const SubAgentTool: ToolDefinition = {
         onText: (text) => {
           fullOutput += text;
         },
-        onToolCall: (name, input) => {
-          const summary = JSON.stringify(input).slice(0, 100);
+        onToolCall: (name, toolInput) => {
+          const summary = JSON.stringify(toolInput).slice(0, 100);
           toolActions.push(`${name}: ${summary}`);
         },
         onToolResult: () => {},
       });
 
-      // Build a summary of what the sub-agent did
       const summary = [
         "## Sub-agent completed",
         "",
